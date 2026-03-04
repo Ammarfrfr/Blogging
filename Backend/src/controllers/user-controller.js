@@ -4,6 +4,24 @@ import { User } from "../models/users.models";
 import { asyncHandler } from "../utils/asyncHandler";
 
 // why we use asyncHandler with async functions is that if we throw an error in async function it will not be caught by the default error handler of express and it will crash the server, so we use asyncHandler to catch the error and pass it to the next middleware which is the error handler middleware and it will handle the error and send the response to the client without crashing the server.
+const generateRefreshToken = async (userId) => {
+  try {
+    const user = await User.findById(userId)
+    if(!user) {
+      throw new ApiError(404, "User not found")
+    }
+
+    const refreshToken = user.generateRefreshToken();
+    const accessToken = user.generateAccessToken();
+
+    user.refreshToken = refreshToken;
+    await user.save({validateBeforeSave: false});
+    
+    return {refreshToken, accessToken}
+  } catch (error) {
+    throw new ApiError(500, "Unable to generate refresh token")
+  }
+}
 
 const registerUser = asyncHandler(async (req, res) => {
   const { email, username, password, name } = req.body
@@ -55,10 +73,32 @@ const logInUser = asyncHandler(async (req, res) => {
   if (!user) {
     throw new ApiError(400, "Invalid credentials")
   }
+
+  const isPasswordCorrect = await user.isPasswordCorrect(password)
+
+  if (!isPasswordCorrect) {
+    throw new ApiError(400, "Invalid credentials")
+  }
+
+  const {accessToken, refreshToken} = await generateRefreshToken(user._id)
+  const options = {
+    httpOnly: true,
+    secure: true
+  }
+
+  const loggedIn = await User.findById
+  (
+    user._id
+  ).select(
+    "-password -refreshToken"
+  );
+
   return res
   .status(200)
+  .cookie("accessToken", accessToken, options)
+  .cookie("refreshToken", refreshToken, options)
   .json(
-    new ApiResponse(200, user, "User logged in successfully")
+    new ApiResponse(200, {user: loggedIn, accessToken, refreshToken}, "User logged in successfully")
   )
 })
 
@@ -87,6 +127,75 @@ const logOutUser = asyncHandler(async (req, res) => {
     new ApiResponse(200, {}, "User logged out successfully")
   )
 })
+
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  const incomingRefreshToken = req.cookies.refreshToken || req.body.refreshToken
+  
+  if (!incomingRefreshToken) {
+    throw new ApiError(400, "Refresh token is required")
+  }
+
+  try {
+    const decodedToken = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    )
+
+    const user = await User.findById(decodedToken._id)
+    
+    if (!user || user.refreshToken !== incomingRefreshToken) {
+      throw new ApiError(401, "Invalid refresh token")
+    }
+
+    if(incomingRefreshToken !== user.refreshToken) { 
+      throw new ApiError(401, "Invalid refresh token")
+    }
+    
+    const options = {
+      httpOnly: true,
+      secure: true
+    }
+
+    const {accessToken, refreshToken} = await generateRefreshToken(user._id)
+    
+    return res
+    .status(200)
+    .cookie("accessToken", accessToken, options)
+    .cookie("refreshToken", refreshToken, options)
+    .json(
+      new ApiResponse(200, {accessToken, refreshToken}, "Access token refreshed successfully")
+    )
+  } catch (error) {
+    throw new ApiError(500, error?.message || "Unable to refresh access token")
+  }
+})
+
+const changeCurrentPassword = asyncHandler( async (req, res) => {
+    const {oldPassword, newPassword } = req.body
+    
+    
+    const user = await User.findById(req.user?._id)
+    const isPasswordCorrect = await user.isPasswordCorrect(oldPassword)
+
+    if(!isPasswordCorrect){
+        throw new ApiError(401, "The old password is incorrect")
+    }
+    
+    /*
+    if(newPassword === confirmPassword){
+        throw new ApiError(401, "The new password and the confirm Password is not same")
+    }
+    */
+
+    user.password = newPassword;
+    await user.save({validateBeforeSave: false})
+
+
+    return res
+    .status(200)
+    .json(new ApiResponse(200, {}, "Password is Changed Successfully"))
+})
+
 
 const getUser = asyncHandler(async (req, res) => {
   return res
@@ -128,4 +237,7 @@ export {
   logOutUser,
   getUser,
   updateAccountDetails,
+  generateRefreshToken,
+  refreshAccessToken,
+  changeCurrentPassword
 }
